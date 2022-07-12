@@ -12,7 +12,7 @@
 //
 // Similarly, you will see statements like this:
 //   {...}
-// The variables inside the ... are kept out of the parent scope. See
+// The declarations inside the ... are kept out of the parent scope. See
 // https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/block
 //
 // There are also statments like this:
@@ -46,74 +46,24 @@ for (let i = 0; i < iconButtons.length; i++) {
   });
 }
 
-// Allow inputting the species (a seven-character hexadecimal color code).
-// Start with a random species.
-{
-  let species = "#" +
-    Math.floor(Math.random() * Math.pow(2,24)).toString(16).padStart(6, "0");
-  const speciesInput = document.getElementById("species");
-  speciesInput.value = species;
-  speciesInput.addEventListener("input", (e) => {
-    species = e.target.value;
-  });
-}
-
-const overlay_cells = document.getElementById("overlay_cells");
-
-// Create the board cells and overlay cells.
-{
-  const board = document.getElementById("board");
-  board.appendChild(makeCells((cell, x, y) => {
-    cell.id = `${x},${y}`
-    cell.className = "board_cell_empty";
-  }));
-
-  overlay_cells.appendChild(makeCells((cell, x, y) => {
-    cell.id = `${x},${y}-overlay`
-  }));
-
-  function makeCells(callback) {
-    const frag = document.createDocumentFragment();
-    for (let x = 0; x < 120; x++) {
-      for (let y = 0; y < 120; y++) {
-        const cell = document.createElement("div");
-        // CSS Grid rows and columns are indexed at 1, as opposed to 0.
-        cell.style.gridRow = `${x+1}`;
-        cell.style.gridColumn = `${y+1}`;
-        callback(cell, x, y);
-        frag.appendChild(cell);
-      }
-    }
-    return frag;
-  }
-}
-
-// Prevent dragging of overlay cells.
-overlay_cells.addEventListener("dragstart", (e) => {
-  e.preventDefault();
-});
-
-const view = document.getElementById("view");
-
-// Prevent the view from scrolling when the mouse is pressed down inside the
-// view and then dragged to the edge of the view.
-{
-  let isDraggingView = false;
-  view.addEventListener("mousedown", (e) => {
-    isDraggingView = true;
-  });
-  view.addEventListener("mousemove", (e) => {
-    e.preventDefault();
-  });
-  document.addEventListener("mouseup", (e) => {
-    isDraggingView = false;
-  });
-};
-
 // Object editor supports filling, emptying, and flushing the overlay cells
 // (div elements). Flushing means emptying all of the filled overlay cells and
 // converting them to a diff to submit to the server.
+//
+// Upon initialization, editor sets up the species input.
 const editor = (() => {
+
+  // Allow inputting the species (a seven-character hexadecimal color code).
+  // Start with a random species.
+  let species = "#" +
+    Math.floor(Math.random() * Math.pow(2,24)).toString(16).padStart(6, "0");
+  {
+    const speciesInput = document.getElementById("species");
+    speciesInput.value = species;
+    speciesInput.addEventListener("input", (e) => {
+      species = e.target.value;
+    });
+  }
 
   // Map where the key is an overlay cell that has been filled, and the value
   // is the species used to fill that cell.
@@ -157,7 +107,44 @@ const editor = (() => {
   return { fill, empty, flush };
 })();
 
+// This block sets up the board and overlay, and sets up the button that
+// toggles between pan mode and draw/erase mode.
 {
+  const overlay_cells = document.getElementById("overlay_cells");
+
+  // Create the board cells and overlay cells.
+  {
+    const board = document.getElementById("board");
+    board.appendChild(makeCells((cell, x, y) => {
+      cell.id = `${x},${y}`
+      cell.className = "board_cell_empty";
+    }));
+
+    overlay_cells.appendChild(makeCells((cell, x, y) => {
+      cell.id = `${x},${y}-overlay`
+    }));
+
+    function makeCells(callback) {
+      const frag = document.createDocumentFragment();
+      for (let x = 0; x < 120; x++) {
+        for (let y = 0; y < 120; y++) {
+          const cell = document.createElement("div");
+          // CSS Grid rows and columns are indexed at 1, as opposed to 0.
+          cell.style.gridRow = `${x+1}`;
+          cell.style.gridColumn = `${y+1}`;
+          callback(cell, x, y);
+          frag.appendChild(cell);
+        }
+      }
+      return frag;
+    }
+  }
+
+  // Prevent dragging of overlay cells.
+  overlay_cells.addEventListener("dragstart", (e) => {
+    e.preventDefault();
+  });
+
   // Object mouseDraw allows drawing and erasing by clicking or dragging with a
   // mouse.
   const mouseDraw = (() => {
@@ -328,7 +315,28 @@ const editor = (() => {
   })();
 
   // Object mousePan allows panning by dragging with a mouse.
+  //
+  // Upon initialization, mousePan prevents the view from automatically
+  // scrolling in response to certain mouse movements.
   const mousePan = (() => {
+
+    const view = document.getElementById("view");
+
+    // Prevent the view from scrolling when the mouse is pressed down inside the
+    // view and then dragged to the edge of the view.
+    {
+      let isDraggingView = false;
+      view.addEventListener("mousedown", (e) => {
+        isDraggingView = true;
+      });
+      view.addEventListener("mousemove", (e) => {
+        e.preventDefault();
+      });
+      document.addEventListener("mouseup", (e) => {
+        isDraggingView = false;
+      });
+    };
+
     let isPanning = false;
 
     function handleMouseDown(e) {
@@ -402,142 +410,150 @@ const editor = (() => {
   }
 }
 
+// This block sets up communication with the server, and sets up handling of
+// visibility changes and user submit actions.
 {
-  // buffer contains the enqueued diffs from the server.
-  let buffer = [];
+  // Object protocol supports communication with the WebSocket server,
+  // including buffering incoming diffs and applying them to the board.
+  const protocol = (() => {
 
-  // Object ws supports connecting and disconnecting from the WebSocket server,
-  // and submitting the diff represented by the filled overlay cells to the
-  // server.
-  const ws = (() => {
-    let websocket;
+    // buffer contains the enqueued diffs from the server.
+    let buffer = [];
 
-    function connect() {
-      websocket = new WebSocket(`ws:\/\/${document.location.host}`);
-      websocket.addEventListener("message", bufferProcessor.enqueue);
-    }
+    // Object ws supports connecting and disconnecting from the WebSocket server,
+    // and submitting the diff produced by editor to the server.
+    const ws = (() => {
+      let websocket;
 
-    function disconnect(reason) {
-      websocket.close(1000, reason);
-      buffer = [];
-    }
-
-    function submit() {
-      websocket.send(JSON.stringify(editor.flush()));
-    }
-
-    return { connect, disconnect, submit };
-  })();
-
-  // Object bufferProcessor treats buffer as a FIFO queue of incoming board
-  // diffs. Function enqueue takes a WebSocket message and adds the diff
-  // contained within to buffer. Diffs are dequeued, parsed, and applied to the
-  // board at a regular interval.
-  //
-  // When the empty diff ("{}") is dequeued, signaling the end of a stream,
-  // dequeueing stops. When a new stream begins, dequeueing starts up again.
-  //
-  // The buffer is considered to be overflowing when it has greater than 5
-  // elements. bufferProcessor periodically checks for overflow, and resets the
-  // connection when this is the case.
-  //
-  // As a special case, enqueue handles the grid message (the first message on a
-  // connection) by applying it to the board immediately. This is because the
-  // server sends the grid immediately. Waiting to process it on the next "tick",
-  // as if it were a diff, would incur a slight delay.
-  //
-  // See protocol.md for more information.
-  const bufferProcessor = (() => {
-
-    const dequeueInterval = 170;
-    let dequeueIntervalID;
-    const timeBetweenBalances = 8000;
-    let balanceBufferTimeoutID;
-    let isBufferOverflowing = false;
-
-    function start() {
-      balanceBufferTimeoutID = setTimeout(balanceBuffer, timeBetweenBalances);
-    }
-
-    function stop() {
-      if (dequeueIntervalID !== undefined) {
-        clearInterval(dequeueIntervalID);
-        dequeueIntervalID = undefined;
+      function connect() {
+        websocket = new WebSocket(`ws:\/\/${document.location.host}`);
+        websocket.addEventListener("message", bufferProcessor.enqueue);
       }
-      clearTimeout(balanceBufferTimeoutID);
-      balanceBufferTimeoutID = undefined;
-    }
 
-    function balanceBuffer() {
-      if (isBufferOverflowing) {
-        ws.disconnect("buffer overflow");
-        ws.connect();
+      function disconnect(reason) {
+        websocket.close(1000, reason);
+        buffer = [];
       }
-      balanceBufferTimeoutID = setTimeout(balanceBuffer, timeBetweenBalances);
-    }
 
-    function enqueue(message) {
-      message.data.text().then((json) => {
-        if (dequeueIntervalID === undefined) {
-          dequeueIntervalID = setInterval(dequeue, dequeueInterval);
+      function submit() {
+        websocket.send(JSON.stringify(editor.flush()));
+      }
+
+      return { connect, disconnect, submit };
+    })();
+
+    // Object bufferProcessor treats buffer as a FIFO queue of incoming board
+    // diffs. Function enqueue takes a WebSocket message and adds the diff
+    // contained within to buffer. Diffs are dequeued, parsed, and applied to the
+    // board at a regular interval.
+    //
+    // When the empty diff ("{}") is dequeued, signaling the end of a stream,
+    // dequeueing stops. When a new stream begins, dequeueing starts up again.
+    //
+    // The buffer is considered to be overflowing when it has greater than 5
+    // elements. bufferProcessor periodically checks for overflow, and resets the
+    // connection when this is the case.
+    //
+    // As a special case, enqueue handles the grid message (the first message on a
+    // connection) by applying it to the board immediately. This is because the
+    // server sends the grid immediately. Waiting to process it on the next "tick",
+    // as if it were a diff, would incur a slight delay.
+    //
+    // See protocol.md for more information.
+    const bufferProcessor = (() => {
+
+      const dequeueInterval = 170;
+      let dequeueIntervalID;
+      const timeBetweenBalances = 8000;
+      let balanceBufferTimeoutID;
+      let isBufferOverflowing = false;
+
+      function start() {
+        balanceBufferTimeoutID = setTimeout(balanceBuffer, timeBetweenBalances);
+      }
+
+      function stop() {
+        if (dequeueIntervalID !== undefined) {
+          clearInterval(dequeueIntervalID);
+          dequeueIntervalID = undefined;
         }
-        if (json.startsWith("[")) {
-          // Apply the grid message to the board immediately.
-          update(json);
+        clearTimeout(balanceBufferTimeoutID);
+        balanceBufferTimeoutID = undefined;
+      }
+
+      function balanceBuffer() {
+        if (isBufferOverflowing) {
+          ws.disconnect("buffer overflow");
+          ws.connect();
+        }
+        balanceBufferTimeoutID = setTimeout(balanceBuffer, timeBetweenBalances);
+      }
+
+      function enqueue(message) {
+        message.data.text().then((json) => {
+          if (dequeueIntervalID === undefined) {
+            dequeueIntervalID = setInterval(dequeue, dequeueInterval);
+          }
+          if (json.startsWith("[")) {
+            // Apply the grid message to the board immediately.
+            update(json);
+            return;
+          }
+          buffer.push(json);
+          checkForBufferOverflow();
+        });
+      }
+
+      function dequeue() {
+        if (buffer.length === 0) {
           return;
         }
-        buffer.push(json);
+        const json = buffer.shift();
         checkForBufferOverflow();
-      });
-    }
-
-    function dequeue() {
-      if (buffer.length === 0) {
-        return;
+        if (json === "{}" && buffer.length === 0) {
+          // We've reached the end of the current stream and there are no further
+          // diffs, so we can stop dequeueing. enqueue will start us dequeuing
+          // again when appropriate.
+          clearInterval(dequeueIntervalID);
+          dequeueIntervalID = undefined;
+          return;
+        }
+        update(json);
       }
-      const json = buffer.shift();
-      checkForBufferOverflow();
-      if (json === "{}" && buffer.length === 0) {
-        // We've reached the end of the current stream and there are no further
-        // diffs, so we can stop dequeueing. enqueue will start us dequeuing
-        // again when appropriate.
-        clearInterval(dequeueIntervalID);
-        dequeueIntervalID = undefined;
-        return;
-      }
-      update(json);
-    }
 
-    // update applies a grid or diff to the board.
-    function update(json) {
-      const change = JSON.parse(json);
-      for (const x in change) {
-        for (const y in change[x]) {
-          const cell = document.getElementById(`${x},${y}`);
-          const species = change[x][y];
-          if (species !== "") {
-            cell.className = "board_cell_filled";
-            cell.style.backgroundColor = species;
-          } else {
-            cell.className = "board_cell_empty";
-            cell.style.backgroundColor = "";
+      // update applies a grid or diff to the board.
+      function update(json) {
+        const change = JSON.parse(json);
+        for (const x in change) {
+          for (const y in change[x]) {
+            const cell = document.getElementById(`${x},${y}`);
+            const species = change[x][y];
+            if (species !== "") {
+              cell.className = "board_cell_filled";
+              cell.style.backgroundColor = species;
+            } else {
+              cell.className = "board_cell_empty";
+              cell.style.backgroundColor = "";
+            }
           }
         }
       }
-    }
 
-    function checkForBufferOverflow() {
-      isBufferOverflowing = buffer.length >= 6;
-    }
+      function checkForBufferOverflow() {
+        isBufferOverflowing = buffer.length >= 6;
+      }
 
-    return { start, stop, enqueue }
+      return { start, stop, enqueue }
+    })();
+
+    return { ws, bufferProcessor }
   })();
 
-  bufferProcessor.start();
+  protocol.bufferProcessor.start();
   // Connect to the WebSocket server.
   // Use setTimeout to ensure that all the costly DOM updates in this script
   // complete before we start enqueuing messages.
-  setTimeout(ws.connect, 0);
+  setTimeout(protocol.ws.connect, 0);
 
   // Release resources when the page is hidden, and reallocate them when the page
   // becomes visible again.
@@ -550,13 +566,13 @@ const editor = (() => {
     let isPageHidden = false;
     document.addEventListener("visibilitychange", (e) => {
       if (document.visibilityState === "hidden") {
-        bufferProcessor.stop();
-        ws.disconnect("page hidden");
+        protocol.bufferProcessor.stop();
+        protocol.ws.disconnect("page hidden");
         isPageHidden = true;
       } else if (document.visibilityState === "visible") {
         if (isPageHidden) {
-          bufferProcessor.start();
-          ws.connect();
+          protocol.bufferProcessor.start();
+          protocol.ws.connect();
           isPageHidden = false;
         }
       }
@@ -566,10 +582,10 @@ const editor = (() => {
   // Allow submitting via the Enter key.
   document.addEventListener("keydown", (e) => {
     if (e.code === "Enter") {
-      ws.submit();
+      procotol.ws.submit();
     }
   });
 
   // Allow submitting via the submit button.
-  iconButtons.namedItem("submit").addEventListener("click", ws.submit);
+  iconButtons.namedItem("submit").addEventListener("click", protocol.ws.submit);
 }
