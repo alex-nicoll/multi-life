@@ -2,68 +2,88 @@
 // parsed. It adds additional elements to the document, sets up event handlers,
 // and sets up the WebSocket connection.
 //
-// You will see a few statements like this:
-//   const x = (() => {...})();
-// There will be some variables inside the ..., and some functions returned and
-// assigned to x. The purpose is to keep the variables together with the
-// functions that use them. The functions are accessible in the parent scope,
-// but the variables are not. This is sometimes called the Revealing Module
-// Pattern (RMP).
-//
-// Similarly, you will see statements like this:
-//   {...}
-// The declarations inside the ... are kept out of the parent scope. See
-// https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/block
-//
-// There are also statments like this:
+// You will see a few statments like this:
 //   element.style.x = "something";
 // This creates an inline style declaration for property x, overriding the
 // style declared in CSS. Setting x to "" removes the inline style declaration,
 // no longer overriding the style declared in CSS. See
 // https://developer.mozilla.org/en-US/docs/Web/API/HTMLElement/style
 
-const iconButtons = document.getElementsByClassName("icon_button");
+// TODO:
+//   - Refactor init() to minimze scope of variables.
+//   - Consider using blocks for small scopes
 
-// Allow icon buttons to change state when touched or moused over.
-for (let i = 0; i < iconButtons.length; i++) {
-  const ib = iconButtons.item(i);
-  ib.addEventListener("pointerenter", (e) => {
-    ib.classList.add("icon_button_over");
-  });
-  ib.addEventListener("pointerleave", (e) => {
-    ib.classList.remove("icon_button_over");
-  });
-}
+init();
 
-// Allow the modal to be opened and closed.
-{
-  const modal = document.getElementById("modal_container");
-  iconButtons.namedItem("info").addEventListener("click", (e) => {
-    modal.style.visibility = "";
+function init() {
+
+  // Initialize DOM refs.
+
+  const iconButtons = document.getElementsByClassName("icon_button");
+  const overlayCells = document.getElementById("overlay_cells");
+  const view = document.getElementById("view");
+
+  // Initialize singleton objects.
+
+  // The species is a seven-character hexadecimal color code. Start with a
+  // random value.
+  const species = {
+    value: "#" + 
+      Math.floor(Math.random() * Math.pow(2,24)).toString(16).padStart(6, "0");
+  };
+  const {fill, empty, flush} = newEditor(species);
+  const mouseDraw = newMouseDraw(overlayCells, fill, empty),
+  const touchDraw = newTouchDraw(overlayCells, fill, empty),
+  const tapDraw = newTapDraw(overlayCells, fill, empty),
+  const mousePan = newMousePan(view)
+  const protocol = newProtocol(flush);
+
+  // Initialize DOM.
+
+  // Allow icon buttons to change state when touched or moused over.
+  for (let i = 0; i < iconButtons.length; i++) {
+    const ib = iconButtons.item(i);
+    ib.addEventListener("pointerenter", (e) => {
+      ib.classList.add("icon_button_over");
+    });
+    ib.addEventListener("pointerleave", (e) => {
+      ib.classList.remove("icon_button_over");
+    });
+  }
+  initBoardCells();
+  overlayCells.appendChild(makeCells((cell, x, y) => {
+    cell.id = `${x},${y}-overlay`
+  }));
+  // Prevent dragging of overlay cells.
+  overlayCells.addEventListener("dragstart", (e) => {
+    e.preventDefault();
   });
-  iconButtons.namedItem("close").addEventListener("click", (e) => {
-    modal.style.visibility = "hidden";
+  initModal(iconButtons);
+  initSpeciesInput(species);
+  initView(view)
+  initModeSwitch(iconButtons, mouseDraw, touchDraw, tapDraw, mousePan);
+  // Allow submitting via the submit button.
+  iconButtons.namedItem("submit").addEventListener("click", protocol.ws.submit);
+  // Allow submitting via the Enter key.
+  document.addEventListener("keydown", (e) => {
+    if (e.code === "Enter") {
+      procotol.ws.submit();
+    }
   });
+  initVisChangeHandling(protocol);
+
+  // Initialize protocol.
+
+  protocol.balancer.start();
+  // Use setTimeout to ensure that all the costly DOM updates in this script
+  // complete before we start receiving messages to process.
+  setTimeout(protocol.ws.connect, 0);
 }
 
 // Object editor supports filling, emptying, and flushing the overlay cells
 // (div elements). Flushing means emptying all of the filled overlay cells and
 // converting them to a diff to submit to the server.
-//
-// Upon initialization, editor sets up the species input.
-const editor = (() => {
-
-  // Allow inputting the species (a seven-character hexadecimal color code).
-  // Start with a random species.
-  let species = "#" +
-    Math.floor(Math.random() * Math.pow(2,24)).toString(16).padStart(6, "0");
-  {
-    const speciesInput = document.getElementById("species");
-    speciesInput.value = species;
-    speciesInput.addEventListener("input", (e) => {
-      species = e.target.value;
-    });
-  }
+function newEditor(species) {
 
   // Map where the key is an overlay cell that has been filled, and the value
   // is the species used to fill that cell.
@@ -71,13 +91,18 @@ const editor = (() => {
 
   function fill(cell) {
     cell.className = "overlay_cell_filled";
-    cell.style.backgroundColor = species;
+    cell.style.backgroundColor = species.value;
     // Store the species along with the cell, to be sent to the server later. We
     // won't be able to use the value of style.backgroundColor, because it may be
     // converted from hexadecimal to something else (e.g., an RGB string),
     // whereas the server accepts only hexadecimal strings.
-    filledOverlayCells.set(cell, species);
+    filledOverlayCells.set(cell, species.value);
   }
+
+  return { fill, ...newEmptyAndFlush(filledOverlayCells) };
+}
+
+function newEmptyAndFlush(filledOverlayCells) {
 
   function empty(cell) {
     cell.className = "";
@@ -104,271 +129,394 @@ const editor = (() => {
     return diff;
   }
 
-  return { fill, empty, flush };
-})();
+  return { empty, flush };
+}
 
-// This block sets up the board and overlay, and sets up the button that
-// toggles between pan mode and draw/erase mode.
-{
-  const overlay_cells = document.getElementById("overlay_cells");
+// Object mouseDraw allows drawing and erasing by clicking or dragging with a
+// mouse.
+function newMouseDraw(overlayCells, fill, empty) {
+  // drawState is either "drawing", "erasing", or undefined.
+  let drawState;
 
-  // Create the board cells and overlay cells.
-  {
-    const board = document.getElementById("board");
-    board.appendChild(makeCells((cell, x, y) => {
-      cell.id = `${x},${y}`
-      cell.className = "board_cell_empty";
-    }));
-
-    overlay_cells.appendChild(makeCells((cell, x, y) => {
-      cell.id = `${x},${y}-overlay`
-    }));
-
-    function makeCells(callback) {
-      const frag = document.createDocumentFragment();
-      for (let x = 0; x < 120; x++) {
-        for (let y = 0; y < 120; y++) {
-          const cell = document.createElement("div");
-          // CSS Grid rows and columns are indexed at 1, as opposed to 0.
-          cell.style.gridRow = `${x+1}`;
-          cell.style.gridColumn = `${y+1}`;
-          callback(cell, x, y);
-          frag.appendChild(cell);
-        }
-      }
-      return frag;
+  function handleMouseDown(e) {
+    const cell = e.target;
+    if (cell.className === "overlay_cell_filled") {
+      empty(cell);
+      drawState = "erasing";
+    } else {
+      fill(cell);
+      drawState = "drawing";
     }
   }
 
-  // Prevent dragging of overlay cells.
-  overlay_cells.addEventListener("dragstart", (e) => {
-    e.preventDefault();
-  });
+  function handleMouseOver(e) {
+    drawOrErase(fill, empty, drawState, e.target);
+  }
 
-  // Object mouseDraw allows drawing and erasing by clicking or dragging with a
-  // mouse.
-  const mouseDraw = (() => {
-    // drawState is either "drawing", "erasing", or undefined.
-    let drawState;
+  function handleMouseUp(e) {
+    drawState = undefined;
+  }
 
-    function handleMouseDown(e) {
-      const cell = e.target;
-      if (cell.className === "overlay_cell_filled") {
-        editor.empty(cell);
-        drawState = "erasing";
-      } else {
-        editor.fill(cell);
-        drawState = "drawing";
-      }
+  // TODO: editor need not be in scope for enable() and disable()
+
+  // TODO: maybe enable and disable *should* be anonymous so that they aren't
+  // in scope for the handlers.
+  function enable() {
+    overlayCells.addEventListener("mousedown", handleMouseDown);
+    overlayCells.addEventListener("mouseover", handleMouseOver);
+    document.addEventListener("mouseup", handleMouseUp);
+  }
+
+  function disable() {
+    overlayCells.removeEventListener("mousedown", handleMouseDown);
+    overlayCells.removeEventListener("mouseover", handleMouseOver);
+    document.removeEventListener("mouseup", handleMouseUp);
+    drawState = undefined;
+  }
+
+  return { enable, disable };
+}
+
+// Object touchDraw allows drawing and erasing by dragging with a single touch.
+// touchDraw only draws when a single touch moves. It doesn't draw when a
+// single touch starts, in order to prevent accidental drawing in case of a
+// multi-touch pan/zoom. As a result, we need some other way to handle taps.
+function newTouchDraw(overlayCells, fill, empty) {
+  // drawState is either "drawing", "erasing", or undefined.
+  let drawState;
+
+  function handleTouchStart(e) {
+    if (e.touches.length !== 1) {
+      return;
     }
-
-    function handleMouseOver(e) {
-      drawOrErase(drawState, e.target);
+    if (e.target.className === "overlay_cell_filled") {
+      drawState = "erasing";
+    } else {
+      drawState = "drawing";
     }
+  }
 
-    function handleMouseUp(e) {
-      drawState = undefined;
+  function handleTouchMove(e) {
+    if (e.touches.length !== 1) {
+      return;
     }
-
-    return {
-      enable: () => {
-        overlay_cells.addEventListener("mousedown", handleMouseDown);
-        overlay_cells.addEventListener("mouseover", handleMouseOver);
-        document.addEventListener("mouseup", handleMouseUp);
-      },
-      disable: () => {
-        overlay_cells.removeEventListener("mousedown", handleMouseDown);
-        overlay_cells.removeEventListener("mouseover", handleMouseOver);
-        document.removeEventListener("mouseup", handleMouseUp);
-        drawState = undefined;
-      }
-    };
-  })();
-
-  // Object touchDraw allows drawing and erasing by dragging with a single touch.
-  // touchDraw only draws when a single touch moves. It doesn't draw when a
-  // single touch starts, in order to prevent accidental drawing in case of a
-  // multi-touch pan/zoom. As a result, we need some other way to handle taps.
-  const touchDraw = (() => {
-    // drawState is either "drawing", "erasing", or undefined.
-    let drawState;
-
-    function handleTouchStart(e) {
-      if (e.touches.length !== 1) {
-        return;
-      }
-      if (e.target.className === "overlay_cell_filled") {
-        drawState = "erasing";
-      } else {
-        drawState = "drawing";
-      }
-    }
-
-    function handleTouchMove(e) {
-      if (e.touches.length !== 1) {
-        return;
-      }
-      if (e.cancelable) {
-        // Prevent scrolling.
-        e.preventDefault();
-      }
-      const touch = e.touches.item(0);
-      const el = document.elementFromPoint(touch.clientX, touch.clientY);
-      if (!el) {
-        // Touch moved outside of the viewport.
-        return;
-      }
-      if (!el.id.endsWith("-overlay")) {
-        // Touch moved outside of overlay_cells.
-        return;
-      }
-      drawOrErase(drawState, el);
-    }
-
-    function handleTouchEnd(e) {
-      drawState = undefined;
-    }
-
-    function handleTouchCancel(e) {
-      drawState = undefined;
-    }
-
-    return {
-      enable: () => {
-        overlay_cells.addEventListener("touchstart", handleTouchStart);
-        overlay_cells.addEventListener("touchmove", handleTouchMove);
-        document.addEventListener("touchend", handleTouchEnd);
-        document.addEventListener("touchcancel", handleTouchCancel);
-      },
-      disable: () => {
-        overlay_cells.removeEventListener("touchstart", handleTouchStart);
-        overlay_cells.removeEventListener("touchmove", handleTouchMove);
-        document.removeEventListener("touchend", handleTouchEnd);
-        document.removeEventListener("touchcancel", handleTouchCancel);
-        drawState = undefined;
-      }
-    };
-  })();
-
-  // Object tapDraw allows drawing and erasing by tapping with a single touch.
-  // You might ask, why is this object needed at all? The browser already fires
-  // mousedown when a tap ("click") is detected, so mouseDraw should handle taps.
-  // Well, on Safari for iOS and DuckDuckGo for Android, waiting for the
-  // mousedown event leads to a very obvious delay between tap and response.
-  const tapDraw = (() => {
-    let isTapping = false;
-
-    function handleTouchStart(e) {
-      if (e.touches.length !== 1) {
-        // Cancel the tap when multiple touches are detected.
-        isTapping = false;
-      }
-      isTapping = true;
-    }
-
-    function handleTouchMove(e) {
-      isTapping = false;
-    }
-
-    function handleTouchEnd(e) {
-      if (e.touches.length !== 0) {
-        // There are still touches on the touch surface, so this isn't a tap.
-        isTapping = false;
-        return;
-      }
-      if (!isTapping) {
-        // This is the end of a one-touch movement, or a multi-touch interaction.
-        return;
-      }
-      const cell = e.target;
-      if (cell.className === "overlay_cell_filled") {
-        editor.empty(cell);
-      } else {
-        editor.fill(cell);
-      }
-      isTapping = false;
-      // Prevent further events from firing, including mousedown (and mouseup,
-      // and click). If mousedown were to fire with mouseDraw enabled, then we
-      // would erase the cell that was just drawn.
+    if (e.cancelable) {
+      // Prevent scrolling.
       e.preventDefault();
     }
+    const touch = e.touches.item(0);
+    const el = document.elementFromPoint(touch.clientX, touch.clientY);
+    if (!el) {
+      // Touch moved outside of the viewport.
+      return;
+    }
+    if (!el.id.endsWith("-overlay")) {
+      // Touch moved outside of overlay_cells.
+      return;
+    }
+    drawOrErase(fill, empty, drawState, el);
+  }
 
-    function handleTouchCancel(e) {
+  function handleTouchEnd(e) {
+    drawState = undefined;
+  }
+
+  function handleTouchCancel(e) {
+    drawState = undefined;
+  }
+
+  function enable() {
+    overlayCells.addEventListener("touchstart", handleTouchStart);
+    overlayCells.addEventListener("touchmove", handleTouchMove);
+    document.addEventListener("touchend", handleTouchEnd);
+    document.addEventListener("touchcancel", handleTouchCancel);
+  }
+
+  function disable() {
+    overlayCells.removeEventListener("touchstart", handleTouchStart);
+    overlayCells.removeEventListener("touchmove", handleTouchMove);
+    document.removeEventListener("touchend", handleTouchEnd);
+    document.removeEventListener("touchcancel", handleTouchCancel);
+    drawState = undefined;
+  }
+
+  return { enable, disable };
+}
+
+// Object tapDraw allows drawing and erasing by tapping with a single touch.
+// You might ask, why is this object needed at all? The browser already fires
+// mousedown when a tap ("click") is detected, so mouseDraw should handle taps.
+// Well, on Safari for iOS and DuckDuckGo for Android, waiting for the
+// mousedown event leads to a very obvious delay between tap and response.
+function newTapDraw(overlayCells, fill, empty) {
+  let isTapping = false;
+
+  function handleTouchStart(e) {
+    if (e.touches.length !== 1) {
+      // Cancel the tap when multiple touches are detected.
       isTapping = false;
     }
+    isTapping = true;
+  }
 
-    return {
-      enable: () => {
-        overlay_cells.addEventListener("touchstart", handleTouchStart);
-        overlay_cells.addEventListener("touchmove", handleTouchMove);
-        overlay_cells.addEventListener("touchend", handleTouchEnd);
-        overlay_cells.addEventListener("touchcancel", handleTouchCancel);
-      },
-      disable: () => {
-        overlay_cells.removeEventListener("touchstart", handleTouchStart);
-        overlay_cells.removeEventListener("touchmove", handleTouchMove);
-        overlay_cells.removeEventListener("touchend", handleTouchEnd);
-        overlay_cells.removeEventListener("touchcancel", handleTouchCancel);
-        isTapping = false;
-      }
-    };
-  })();
+  function handleTouchMove(e) {
+    isTapping = false;
+  }
 
-  // Object mousePan allows panning by dragging with a mouse.
-  //
-  // Upon initialization, mousePan prevents the view from automatically
-  // scrolling in response to certain mouse movements.
-  const mousePan = (() => {
-
-    const view = document.getElementById("view");
-
-    // Prevent the view from scrolling when the mouse is pressed down inside the
-    // view and then dragged to the edge of the view.
-    {
-      let isDraggingView = false;
-      view.addEventListener("mousedown", (e) => {
-        isDraggingView = true;
-      });
-      view.addEventListener("mousemove", (e) => {
-        e.preventDefault();
-      });
-      document.addEventListener("mouseup", (e) => {
-        isDraggingView = false;
-      });
-    };
-
-    let isPanning = false;
-
-    function handleMouseDown(e) {
-      isPanning = true;
+  function handleTouchEnd(e) {
+    if (e.touches.length !== 0) {
+      // There are still touches on the touch surface, so this isn't a tap.
+      isTapping = false;
+      return;
     }
-
-    function handleMouseMove(e) {
-      if (isPanning) {
-        view.scrollTop -= e.movementY;
-        view.scrollLeft -= e.movementX;
-      }
+    if (!isTapping) {
+      // This is the end of a one-touch movement, or a multi-touch interaction.
+      return;
     }
-
-    function handleMouseUp(e) {
-      isPanning = false;
+    const cell = e.target;
+    if (cell.className === "overlay_cell_filled") {
+      empty(cell);
+    } else {
+      fill(cell);
     }
+    isTapping = false;
+    // Prevent further events from firing, including mousedown (and mouseup,
+    // and click). If mousedown were to fire with mouseDraw enabled, then we
+    // would erase the cell that was just drawn.
+    e.preventDefault();
+  }
 
-    return {
-      enable: () => {
-        view.addEventListener("mousedown", handleMouseDown);
-        document.addEventListener("mousemove", handleMouseMove);
-        document.addEventListener("mouseup", handleMouseUp);
-      },
-      disable: () => {
-        view.removeEventListener("mousedown", handleMouseDown);
-        document.removeEventListener("mousemove", handleMouseMove);
-        document.removeEventListener("mouseup", handleMouseUp);
-        isPanning = false;
+  function handleTouchCancel(e) {
+    isTapping = false;
+  }
+
+  function enable() {
+    overlayCells.addEventListener("touchstart", handleTouchStart);
+    overlayCells.addEventListener("touchmove", handleTouchMove);
+    overlayCells.addEventListener("touchend", handleTouchEnd);
+    overlayCells.addEventListener("touchcancel", handleTouchCancel);
+  }
+
+  function disable() {
+    overlayCells.removeEventListener("touchstart", handleTouchStart);
+    overlayCells.removeEventListener("touchmove", handleTouchMove);
+    overlayCells.removeEventListener("touchend", handleTouchEnd);
+    overlayCells.removeEventListener("touchcancel", handleTouchCancel);
+    isTapping = false;
+  }
+
+  return { enable, disable };
+}
+
+// Object mousePan allows panning by dragging with a mouse.
+function newMousePan(view) {
+  let isPanning = false;
+
+  function handleMouseDown(e) {
+    isPanning = true;
+  }
+
+  function handleMouseMove(e) {
+    if (isPanning) {
+      view.scrollTop -= e.movementY;
+      view.scrollLeft -= e.movementX;
+    }
+  }
+
+  function handleMouseUp(e) {
+    isPanning = false;
+  }
+
+  function enable() {
+    view.addEventListener("mousedown", handleMouseDown);
+    document.addEventListener("mousemove", handleMouseMove);
+    document.addEventListener("mouseup", handleMouseUp);
+  }
+
+  function disable() {
+    view.removeEventListener("mousedown", handleMouseDown);
+    document.removeEventListener("mousemove", handleMouseMove);
+    document.removeEventListener("mouseup", handleMouseUp);
+    isPanning = false;
+  }
+
+  return { enable, disable };
+}
+
+// Object protocol supports communication with the WebSocket server,
+// including buffering incoming diffs and applying them to the board.
+function newProtocol(flush) {
+
+  // buffer contains the enqueued diffs from the server.
+  const buffer = { value: [] };
+  const dequeueIntervalID = { value: undefined };
+  const isBufferOverflowing = { value: false };
+
+  const processor = newProcessor(buffer, dequeueIntervalID, isBufferOverflowing);
+  const ws = newWs(buffer, processor, flush);
+  const balancer = newBalancer(ws, dequeueIntervalID, isBufferOverflowing);
+
+  return { ws, balancer };
+}
+
+// Object ws supports connecting and disconnecting from the WebSocket server,
+// and submitting the diff produced by editor to the server.
+function newWs(buffer, processor, flush) {
+  let websocket;
+
+  function connect() {
+    websocket = new WebSocket(`ws:\/\/${document.location.host}`);
+    websocket.addEventListener("message", processor);
+  }
+
+  function disconnect(reason) {
+    websocket.close(1000, reason);
+    buffer.value = [];
+  }
+
+  function submit() {
+    websocket.send(JSON.stringify(flush()));
+  }
+
+  return { connect, disconnect, submit };
+}
+
+// Function processor treats buffer as a FIFO queue of incoming board diffs.
+// The returned function takes a WebSocket message and adds the diff contained
+// within to buffer. Diffs are dequeued, parsed, and applied to the board at a
+// regular interval.
+//
+// When the empty diff ("{}") is dequeued, signaling the end of a stream,
+// dequeueing stops. When a new stream begins, dequeueing starts up again.
+//
+// Processor detects buffer overflow. The buffer is considered to be
+// overflowing when it has greater than 5 elements.
+//
+// As a special case, processor handles the grid message (the first message on
+// a connection) by applying it to the board immediately. This is because the
+// server sends the grid immediately. Waiting to process it on the next "tick",
+// as if it were a diff, would incur a slight delay.
+//
+// See protocol.md for more information.
+function newProcessor(buffer, dequeueIntervalID, isBufferOverflowing) {
+  const dequeueInterval = 170;
+
+  function checkForBufferOverflow() {
+    isBufferOverflowing.value = buffer.length >= 6;
+  }
+
+  function dequeue() {
+    if (buffer.value.length === 0) {
+      return;
+    }
+    const json = buffer.value.shift();
+    checkForBufferOverflow();
+    if (json === "{}" && buffer.length === 0) {
+      // We've reached the end of the current stream and there are no further
+      // diffs, so we can stop dequeueing. enqueue will start us dequeuing
+      // again when appropriate.
+      clearInterval(dequeueIntervalID.value);
+      dequeueIntervalID.value = undefined;
+      return;
+    }
+    update(json);
+  }
+
+  return function(message) {
+    message.data.text().then((json) => {
+      if (dequeueIntervalID.value === undefined) {
+        dequeueIntervalID.value = setInterval(dequeue, dequeueInterval);
       }
-    };
-  })();
+      if (json.startsWith("[")) {
+        // Apply the grid message to the board immediately.
+        update(json);
+        return;
+      }
+      buffer.value.push(json);
+      checkForBufferOverflow();
+    });
+  }
+}
 
+// Object balancer periodically checks for buffer overflow, and resets the
+// connection when this is the case. When balancer is stopped, it will in turn
+// stop processor.
+// TODO: Does balancer need access to dequeueIntervalID?
+function newBalancer(ws, dequeueIntervalID, isBufferOverflowing) {
+
+  const timeBetweenBalances = 8000;
+  let balanceBufferTimeoutID;
+
+  function start() {
+    balanceBufferTimeoutID = setTimeout(balanceBuffer, timeBetweenBalances);
+  }
+
+  function stop() {
+    if (dequeueIntervalID.value !== undefined) {
+      clearInterval(dequeueIntervalID);
+      dequeueIntervalID.value = undefined;
+    }
+    clearTimeout(balanceBufferTimeoutID);
+    balanceBufferTimeoutID = undefined;
+  }
+
+  function balanceBuffer() {
+    if (isBufferOverflowing.value) {
+      ws.disconnect("buffer overflow");
+      ws.connect();
+    }
+    balanceBufferTimeoutID = setTimeout(balanceBuffer, timeBetweenBalances);
+  }
+
+  return { start, stop }
+}
+
+function initBoardCells() {
+  const board = document.getElementById("board");
+  board.appendChild(makeCells((cell, x, y) => {
+    cell.id = `${x},${y}`
+    cell.className = "board_cell_empty";
+  }));
+}
+
+function initModal(iconButtons) {
+  // Allow the modal to be opened and closed.
+  const modal = document.getElementById("modal_container");
+  iconButtons.namedItem("info").addEventListener("click", (e) => {
+    modal.style.visibility = "";
+  });
+  iconButtons.namedItem("close").addEventListener("click", (e) => {
+    modal.style.visibility = "hidden";
+  });
+}
+
+function initSpeciesInput(species) {
+  const speciesInput = document.getElementById("species");
+  speciesInput.value = species.value;
+  speciesInput.addEventListener("input", (e) => {
+    species.value = e.target.value;
+  });
+}
+
+function initView(view) {
+  // Prevent the view from scrolling when the mouse is pressed down inside the
+  // view and then dragged to the edge of the view.
+  let isDraggingView = false;
+  view.addEventListener("mousedown", (e) => {
+    isDraggingView = true;
+  });
+  view.addEventListener("mousemove", (e) => {
+    e.preventDefault();
+  });
+  document.addEventListener("mouseup", (e) => {
+    isDraggingView = false;
+  });
+
+  return view;
+}
+
+// initModeSwitch allows switching between pan mode and draw/erase mode.
+function initModeSwitch(iconButtons, mouseDraw, touchDraw, tapDraw, mousePan) {
   // isPanMode is true when we are in pan mode, and false when we are in
   // draw/erase mode.
   let isPanMode = false;
@@ -376,7 +524,6 @@ const editor = (() => {
   touchDraw.enable();
   tapDraw.enable();
 
-  // Allow switching between pan mode and draw/erase mode.
   const move = iconButtons.namedItem("move");
   move.addEventListener("click", (e) => {
     if (isPanMode) {
@@ -400,161 +547,9 @@ const editor = (() => {
       move.style.borderColor = "unset";
     }
   });
-
-  function drawOrErase(drawState, cell) {
-    if (drawState === "drawing" && cell.className === "") {
-      editor.fill(cell);
-    } else if (drawState === "erasing" && cell.className === "overlay_cell_filled") {
-      editor.empty(cell);
-    }
-  }
 }
 
-// This block sets up communication with the server, and sets up handling of
-// visibility changes and user submit actions.
-{
-  // Object protocol supports communication with the WebSocket server,
-  // including buffering incoming diffs and applying them to the board.
-  const protocol = (() => {
-
-    // buffer contains the enqueued diffs from the server.
-    let buffer = [];
-
-    // Object ws supports connecting and disconnecting from the WebSocket server,
-    // and submitting the diff produced by editor to the server.
-    const ws = (() => {
-      let websocket;
-
-      function connect() {
-        websocket = new WebSocket(`ws:\/\/${document.location.host}`);
-        websocket.addEventListener("message", bufferProcessor.enqueue);
-      }
-
-      function disconnect(reason) {
-        websocket.close(1000, reason);
-        buffer = [];
-      }
-
-      function submit() {
-        websocket.send(JSON.stringify(editor.flush()));
-      }
-
-      return { connect, disconnect, submit };
-    })();
-
-    // Object bufferProcessor treats buffer as a FIFO queue of incoming board
-    // diffs. Function enqueue takes a WebSocket message and adds the diff
-    // contained within to buffer. Diffs are dequeued, parsed, and applied to the
-    // board at a regular interval.
-    //
-    // When the empty diff ("{}") is dequeued, signaling the end of a stream,
-    // dequeueing stops. When a new stream begins, dequeueing starts up again.
-    //
-    // The buffer is considered to be overflowing when it has greater than 5
-    // elements. bufferProcessor periodically checks for overflow, and resets the
-    // connection when this is the case.
-    //
-    // As a special case, enqueue handles the grid message (the first message on a
-    // connection) by applying it to the board immediately. This is because the
-    // server sends the grid immediately. Waiting to process it on the next "tick",
-    // as if it were a diff, would incur a slight delay.
-    //
-    // See protocol.md for more information.
-    const bufferProcessor = (() => {
-
-      const dequeueInterval = 170;
-      let dequeueIntervalID;
-      const timeBetweenBalances = 8000;
-      let balanceBufferTimeoutID;
-      let isBufferOverflowing = false;
-
-      function start() {
-        balanceBufferTimeoutID = setTimeout(balanceBuffer, timeBetweenBalances);
-      }
-
-      function stop() {
-        if (dequeueIntervalID !== undefined) {
-          clearInterval(dequeueIntervalID);
-          dequeueIntervalID = undefined;
-        }
-        clearTimeout(balanceBufferTimeoutID);
-        balanceBufferTimeoutID = undefined;
-      }
-
-      function balanceBuffer() {
-        if (isBufferOverflowing) {
-          ws.disconnect("buffer overflow");
-          ws.connect();
-        }
-        balanceBufferTimeoutID = setTimeout(balanceBuffer, timeBetweenBalances);
-      }
-
-      function enqueue(message) {
-        message.data.text().then((json) => {
-          if (dequeueIntervalID === undefined) {
-            dequeueIntervalID = setInterval(dequeue, dequeueInterval);
-          }
-          if (json.startsWith("[")) {
-            // Apply the grid message to the board immediately.
-            update(json);
-            return;
-          }
-          buffer.push(json);
-          checkForBufferOverflow();
-        });
-      }
-
-      function dequeue() {
-        if (buffer.length === 0) {
-          return;
-        }
-        const json = buffer.shift();
-        checkForBufferOverflow();
-        if (json === "{}" && buffer.length === 0) {
-          // We've reached the end of the current stream and there are no further
-          // diffs, so we can stop dequeueing. enqueue will start us dequeuing
-          // again when appropriate.
-          clearInterval(dequeueIntervalID);
-          dequeueIntervalID = undefined;
-          return;
-        }
-        update(json);
-      }
-
-      // update applies a grid or diff to the board.
-      function update(json) {
-        const change = JSON.parse(json);
-        for (const x in change) {
-          for (const y in change[x]) {
-            const cell = document.getElementById(`${x},${y}`);
-            const species = change[x][y];
-            if (species !== "") {
-              cell.className = "board_cell_filled";
-              cell.style.backgroundColor = species;
-            } else {
-              cell.className = "board_cell_empty";
-              cell.style.backgroundColor = "";
-            }
-          }
-        }
-      }
-
-      function checkForBufferOverflow() {
-        isBufferOverflowing = buffer.length >= 6;
-      }
-
-      return { start, stop, enqueue }
-    })();
-
-    return { ws, bufferProcessor }
-  })();
-
-  protocol.bufferProcessor.start();
-  // Connect to the WebSocket server.
-  // Use setTimeout to ensure that all the costly DOM updates in this script
-  // complete before we start enqueuing messages.
-  setTimeout(protocol.ws.connect, 0);
-
+function initVisChangeHandling(protocol) {
   // Release resources when the page is hidden, and reallocate them when the page
   // becomes visible again.
   // We may get a visibilitychange event with visibilityState "visible" without
@@ -562,30 +557,65 @@ const editor = (() => {
   // iOS when minimizing the browser and then quickly maximizing it. So we use
   // isPageHidden to determine whether the visibility state actually changed from
   // "hidden" to "visible", thereby preventing a resource leak.
-  {
-    let isPageHidden = false;
-    document.addEventListener("visibilitychange", (e) => {
-      if (document.visibilityState === "hidden") {
-        protocol.bufferProcessor.stop();
-        protocol.ws.disconnect("page hidden");
-        isPageHidden = true;
-      } else if (document.visibilityState === "visible") {
-        if (isPageHidden) {
-          protocol.bufferProcessor.start();
-          protocol.ws.connect();
-          isPageHidden = false;
-        }
+  let isPageHidden = false;
+  document.addEventListener("visibilitychange", (e) => {
+    if (document.visibilityState === "hidden") {
+      protocol.balancer.stop();
+      protocol.ws.disconnect("page hidden");
+      isPageHidden = true;
+    } else if (document.visibilityState === "visible") {
+      if (isPageHidden) {
+        protocol.balancer.start();
+        protocol.ws.connect();
+        isPageHidden = false;
       }
-    });
-  }
-
-  // Allow submitting via the Enter key.
-  document.addEventListener("keydown", (e) => {
-    if (e.code === "Enter") {
-      procotol.ws.submit();
     }
   });
+}
 
-  // Allow submitting via the submit button.
-  iconButtons.namedItem("submit").addEventListener("click", protocol.ws.submit);
+// TODO: what to do about drawOrErase...
+// Method of editor? Then filledOverlayCells and species are in scope. Not
+// good.
+// Function passed editor or fill+empty?
+// Closure with editor or fill+empty?
+// Closure with drawState? Probably not...
+function drawOrErase(fill, empty, drawState, cell) {
+  if (drawState === "drawing" && cell.className === "") {
+    fill(cell);
+  } else if (drawState === "erasing" && cell.className === "overlay_cell_filled") {
+    empty(cell);
+  }
+}
+
+// update applies a grid or diff to the board.
+function update(json) {
+  const change = JSON.parse(json);
+  for (const x in change) {
+    for (const y in change[x]) {
+      const cell = document.getElementById(`${x},${y}`);
+      const species = change[x][y];
+      if (species !== "") {
+        cell.className = "board_cell_filled";
+        cell.style.backgroundColor = species;
+      } else {
+        cell.className = "board_cell_empty";
+        cell.style.backgroundColor = "";
+      }
+    }
+  }
+}
+
+function makeCells(callback) {
+  const frag = document.createDocumentFragment();
+  for (let x = 0; x < 120; x++) {
+    for (let y = 0; y < 120; y++) {
+      const cell = document.createElement("div");
+      // CSS Grid rows and columns are indexed at 1, as opposed to 0.
+      cell.style.gridRow = `${x+1}`;
+      cell.style.gridColumn = `${y+1}`;
+      callback(cell, x, y);
+      frag.appendChild(cell);
+    }
+  }
+  return frag;
 }
